@@ -4,6 +4,8 @@
 import os
 import random
 import asyncio
+from collections import deque
+from typing import Generator
 
 import discord
 import google.generativeai as genai
@@ -19,6 +21,19 @@ genai_model = genai.GenerativeModel()  # type: ignore
 
 intents = discord.Intents.default()
 intents.message_content = True
+
+
+def chunk_to_line(
+    response: genai.types.GenerateContentResponse  # type: ignore
+) -> Generator[str, None, None]:
+    """Used for chunked responses. Turns chunks into lines"""
+    buffer = deque([""])
+    for chunk in response:
+        buffer += (buffer.pop() + chunk.text).split("\n")
+        while len(buffer) > 1:
+            yield buffer.popleft()
+    yield buffer.popleft()
+
 
 bot = commands.Bot(command_prefix=".", intents=intents)
 
@@ -88,7 +103,8 @@ Generates a sequence of random numbers and asks the user to guess them."""
     correct_nums = [str(random.randint(1, range_)) for _ in range(numbers)]
 
     await ctx.send(
-        "Please enter your sequence (You have 30 seconds to respond):"
+        f"Please enter {numbers} numbers from 1 to {range_}" +
+        "(You have 30 seconds to respond):"
     )
 
     def check(m):
@@ -124,28 +140,26 @@ async def ai(
 ) -> None:
     """Talk to Gemini AI"""
     async with ctx.typing():
-        response = await genai_model.generate_content_async(
-            message
-        )
-        lines = response.text.splitlines()
-        i = 0
-        while True:
-            if i >= len(lines):
-                return
-            chunk = lines[i]
-            if not chunk:
-                i += 1
-            elif "```" in chunk:
-                j = i + 1
-                chunk = lines[j]
-                while j < len(lines) and "```" not in chunk:
-                    j += 1
-                    chunk = lines[j]
-                await ctx.send("\n".join(lines[i:j+1]))
-                i = j + 1
-            else:
-                await ctx.send(chunk)
-                i += 1
+        response = genai_model.generate_content(message, stream=True)
+        lines = chunk_to_line(response)
+        mode = "normal"
+        output = []
+        for line in lines:
+            match mode:
+                case "normal":
+                    if not line:
+                        continue
+                    if "```" in line:
+                        mode = "code"
+                        output.append(line)
+                    else:
+                        await ctx.send(line)
+                case "code":
+                    output.append(line)
+                    if "```" in line:
+                        mode = "normal"
+                        await ctx.send('\n'.join(output))
+                        del output[:]
 
 
 def main():
